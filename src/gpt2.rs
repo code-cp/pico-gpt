@@ -72,11 +72,15 @@ impl<B: Backend> Model<B> {
         for _ in 0..num_tokens {
             let logits = self.forward(&inputs);
 
+            // select the last row from logits
+            // which corresponds to the logits for next token
             let indices = Tensor::<B, 1, Int>::from_data(
                 Data::new(vec![(logits.dims()[0] - 1) as i32], Shape::new([1])).convert(),
                 &device,
             );
+            // size (1xvocab size)
             let selected_logits = logits.select(0, indices);
+            // argmax along dim 1, not dim 0
             let next_token_id = selected_logits.argmax(1);
             let next_token_id = next_token_id.into_scalar().elem::<i32>();
 
