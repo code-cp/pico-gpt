@@ -5,7 +5,7 @@ use std::env;
 use std::path::PathBuf;
 
 use pico_gpt::encoder::Encoder;
-use pico_gpt::gpt2::Model;
+use pico_gpt::gpt2::{Model, ModelConfig};
 use pico_gpt::hyper_params::HyperParams;
 
 type Backend = burn::backend::Autodiff<burn::backend::Wgpu>;
@@ -18,12 +18,13 @@ fn main() -> Result<()> {
     let num_tokens = 8;
 
     let hyper_params = HyperParams::from_dir(&model_dir).context("cannot load hyper params")?;
-    let model = Model::<Backend>::from_dir(
-        model_dir.join("exploded_model"),
-        hyper_params.num_heads,
-        hyper_params.network_depth,
-    )
-    .context("params")?;
+    let model_config = ModelConfig {
+        model_dir: model_dir.join("exploded_model"),
+        num_heads: hyper_params.num_heads,
+        depth: hyper_params.network_depth,
+    };
+    let device = WgpuDevice::default();
+    let model: Model<Backend> = model_config.init(&device);
 
     let mut encoder = Encoder::from_dir(&model_dir).context("cannot load encoder")?;
 

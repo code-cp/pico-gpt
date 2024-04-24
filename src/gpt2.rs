@@ -2,36 +2,31 @@ use anyhow::{bail, Context, Result};
 use burn::{
     config::Config,
     module::Module,
-    nn::{Gelu, LayerNorm},
+    nn::{attention, Gelu, LayerNorm},
     tensor::{backend::Backend, ElementConversion, Tensor},
 };
 use burn_tensor::{activation, Data, Int, Shape};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::encoder::{Token, TokenId};
 
-#[derive(Module, Debug)]
-pub struct Model<B: Backend> {
-    pub token_embedding: Tensor<B, 2>,
-    pub position_embedding: Tensor<B, 2>,
-    pub blocks: Vec<Block<B>>,
-    layer_norm: MyLayerNorm<B>,
+#[derive(Config)]
+pub struct ModelConfig {
+    pub model_dir: PathBuf,
+    pub num_heads: usize,
+    pub depth: usize,
 }
 
-impl<B: Backend> Model<B> {
-    pub fn from_dir<P: AsRef<Path>>(model_dir: P, num_heads: usize, depth: usize) -> Result<Self> {
-        let model_dir = model_dir.as_ref();
-
+impl ModelConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Model<B> {
         let token_embedding_arr: Array2<f32> =
-            ndarray_npy::read_npy(model_dir.join("wte.npy")).context("cannot load wte")?;
+            ndarray_npy::read_npy(self.model_dir.join("wte.npy")).expect("should load wte");
         let token_embedding_vec: Vec<f32> = token_embedding_arr.iter().copied().collect();
 
         let position_embedding_arr: Array2<f32> =
-            ndarray_npy::read_npy(model_dir.join("wpe.npy")).context("cannot load wpe")?;
+            ndarray_npy::read_npy(self.model_dir.join("wpe.npy")).expect("should load wpe");
         let position_embedding_vec: Vec<f32> = position_embedding_arr.iter().copied().collect();
-
-        let device = B::Device::default();
 
         let token_embedding: Tensor<B, 2> = Tensor::<B, 2>::from_data(
             Data::new(
@@ -42,7 +37,7 @@ impl<B: Backend> Model<B> {
                 ]),
             )
             .convert(),
-            &device,
+            device,
         );
 
         let position_embedding: Tensor<B, 2> = Tensor::<B, 2>::from_data(
@@ -54,18 +49,37 @@ impl<B: Backend> Model<B> {
                 ]),
             )
             .convert(),
-            &device,
+            device,
         );
 
-        Ok(Self {
+        let layer_norm_config = Gpt2LayerNormConfig {
+            layer_norm_dir: self.model_dir.join("ln_f"),
+        };
+
+        let block_config = BlockConfig {
+            model_dir: self.model_dir.to_owned(),
+            num_heads: self.num_heads,
+            depth: self.depth,
+        };
+
+        Model {
             token_embedding,
             position_embedding,
-            blocks: Block::from_dirs(model_dir, num_heads, depth).context("cannot load block")?,
-            layer_norm: MyLayerNorm::from_dir(model_dir.join("ln_f"), &device)
-                .context("cannot load layer norm")?,
-        })
+            blocks: block_config.init(device),
+            layer_norm: layer_norm_config.init(device),
+        }
     }
+}
 
+#[derive(Module, Debug)]
+pub struct Model<B: Backend> {
+    pub token_embedding: Tensor<B, 2>,
+    pub position_embedding: Tensor<B, 2>,
+    pub blocks: Vec<Block<B>>,
+    layer_norm: Gpt2LayerNorm<B>,
+}
+
+impl<B: Backend> Model<B> {
     pub fn generate(&self, mut inputs: Vec<TokenId>, num_tokens: usize) -> Vec<TokenId> {
         let device = B::Device::default();
 
@@ -122,18 +136,17 @@ impl<B: Backend> Model<B> {
     }
 }
 
-#[derive(Module, Debug)]
-pub struct MyLinearLayer<B: Backend> {
-    pub weights: Tensor<B, 2>,
-    pub bias: Tensor<B, 1>,
+#[derive(Config)]
+pub struct Gpt2LinearLayerConfig {
+    pub weights_dir: PathBuf,
 }
 
-impl<B: Backend> MyLinearLayer<B> {
-    pub fn from_dir<P: AsRef<Path>>(weights_dir: P, device: &B::Device) -> Result<Self> {
-        let weights_dir = weights_dir.as_ref();
-
-        let weights_arr: Array2<f32> = ndarray_npy::read_npy(weights_dir.join("w.npy"))?;
-        let bias_arr: Array1<f32> = ndarray_npy::read_npy(weights_dir.join("b.npy"))?;
+impl Gpt2LinearLayerConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Gpt2LinearLayer<B> {
+        let weights_arr: Array2<f32> =
+            ndarray_npy::read_npy(self.weights_dir.join("w.npy")).expect("should load w.npy");
+        let bias_arr: Array1<f32> =
+            ndarray_npy::read_npy(self.weights_dir.join("b.npy")).expect("should load b.npy");
 
         let weights_vec = weights_arr.iter().cloned().collect::<Vec<_>>();
         let bias_vec = bias_arr.iter().cloned().collect::<Vec<_>>();
@@ -151,24 +164,59 @@ impl<B: Backend> MyLinearLayer<B> {
             device,
         );
 
-        Ok(Self { weights, bias })
+        Gpt2LinearLayer { weights, bias }
     }
+}
 
+#[derive(Module, Debug)]
+pub struct Gpt2LinearLayer<B: Backend> {
+    pub weights: Tensor<B, 2>,
+    pub bias: Tensor<B, 1>,
+}
+
+impl<B: Backend> Gpt2LinearLayer<B> {
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let bias = self.bias.clone().unsqueeze::<2>();
         x.matmul(self.weights.clone()) + bias
     }
 }
 
+#[derive(Config)]
+pub struct FeedForwardConfig {
+    pub block_dir: PathBuf,
+}
+
+impl FeedForwardConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> FeedForward<B> {
+        let expand_config = Gpt2LinearLayerConfig {
+            weights_dir: self.block_dir.join("mlp/c_fc"),
+        };
+        let contract_config = Gpt2LinearLayerConfig {
+            weights_dir: self.block_dir.join("mlp/c_proj"),
+        };
+
+        let layer_norm_config = Gpt2LayerNormConfig {
+            layer_norm_dir: self.block_dir.join("ln_2"),
+        };
+
+        FeedForward {
+            layer_norm: layer_norm_config.init(device),
+            expand: expand_config.init(device),
+            contract: contract_config.init(device),
+            activation: Gelu::new(),
+        }
+    }
+}
+
 #[derive(Module, Debug)]
-pub struct Network<B: Backend> {
-    pub layer_norm: MyLayerNorm<B>,
-    pub expand: MyLinearLayer<B>,
-    pub contract: MyLinearLayer<B>,
+pub struct FeedForward<B: Backend> {
+    pub layer_norm: Gpt2LayerNorm<B>,
+    pub expand: Gpt2LinearLayer<B>,
+    pub contract: Gpt2LinearLayer<B>,
     pub activation: Gelu,
 }
 
-impl<B: Backend> Network<B> {
+impl<B: Backend> FeedForward<B> {
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = self.layer_norm.forward(x);
         let x = self.expand.forward(x);
@@ -180,11 +228,39 @@ impl<B: Backend> Network<B> {
     }
 }
 
+#[derive(Config)]
+pub struct AttentionConfig {
+    pub block_dir: PathBuf,
+    pub num_heads: usize,
+}
+
+impl AttentionConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Attention<B> {
+        let expand_config = Gpt2LinearLayerConfig {
+            weights_dir: self.block_dir.join("attn/c_attn"),
+        };
+        let contract_config = Gpt2LinearLayerConfig {
+            weights_dir: self.block_dir.join("attn/c_proj"),
+        };
+
+        let layer_norm_config = Gpt2LayerNormConfig {
+            layer_norm_dir: self.block_dir.join("ln_1"),
+        };
+
+        Attention {
+            layer_norm: layer_norm_config.init(device),
+            expand: expand_config.init(device),
+            contract: contract_config.init(device),
+            num_heads: self.num_heads,
+        }
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct Attention<B: Backend> {
-    pub layer_norm: MyLayerNorm<B>,
-    pub expand: MyLinearLayer<B>,
-    pub contract: MyLinearLayer<B>,
+    pub layer_norm: Gpt2LayerNorm<B>,
+    pub expand: Gpt2LinearLayer<B>,
+    pub contract: Gpt2LinearLayer<B>,
     pub num_heads: usize,
 }
 
@@ -231,72 +307,65 @@ impl<B: Backend> Attention<B> {
     }
 }
 
+#[derive(Config)]
+pub struct BlockConfig {
+    pub model_dir: PathBuf,
+    pub num_heads: usize,
+    pub depth: usize,
+}
+
+impl BlockConfig {
+    pub fn init_block<B: Backend>(&self, block_dir: PathBuf, device: &B::Device) -> Block<B> {
+        let attention_config = AttentionConfig {
+            block_dir: block_dir.clone(),
+            num_heads: self.num_heads,
+        };
+        let attention = attention_config.init(device);
+
+        let feedforward_config = FeedForwardConfig {
+            block_dir: block_dir.to_path_buf(),
+        };
+        let feedforward = feedforward_config.init(device);
+
+        Block {
+            attention,
+            feedforward,
+        }
+    }
+
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Vec<Block<B>> {
+        (0..self.depth)
+            .map(|block_idx| self.init_block(self.model_dir.join(format!("h{block_idx}")), device))
+            .collect()
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct Block<B: Backend> {
     pub attention: Attention<B>,
-    pub network: Network<B>,
+    pub feedforward: FeedForward<B>,
 }
 
 impl<B: Backend> Block<B> {
-    pub fn from_dirs<P: AsRef<Path>>(
-        model_dir: P,
-        num_heads: usize,
-        depth: usize,
-    ) -> Result<Vec<Self>> {
-        let model_dir = model_dir.as_ref();
-
-        (0..depth)
-            .map(|block_idx| Self::from_dir(model_dir.join(format!("h{block_idx}")), num_heads))
-            .collect()
-    }
-
-    fn from_dir<P: AsRef<Path>>(block_dir: P, num_heads: usize) -> Result<Self> {
-        let block_dir = block_dir.as_ref();
-
-        let device = B::Device::default();
-        let attention = Attention {
-            layer_norm: MyLayerNorm::from_dir(block_dir.join("ln_1"), &device)
-                .context("cannot load ln_1")?,
-            expand: MyLinearLayer::from_dir(block_dir.join("attn/c_attn"), &device)
-                .context("cannot load c_attn")?,
-            contract: MyLinearLayer::from_dir(block_dir.join("attn/c_proj"), &device)
-                .context("cannot load c_proj")?,
-            num_heads,
-        };
-        let network = Network {
-            layer_norm: MyLayerNorm::from_dir(block_dir.join("ln_2"), &device)
-                .context("cannot load ln_2")?,
-            expand: MyLinearLayer::from_dir(block_dir.join("mlp/c_fc"), &device)
-                .context("cannot load mlp/c_fc")?,
-            contract: MyLinearLayer::from_dir(block_dir.join("mlp/c_proj"), &device)
-                .context("cannot load mlp/c_proj")?,
-            activation: Gelu::new(),
-        };
-
-        Ok(Self { attention, network })
-    }
-
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = x.clone() + self.attention.forward(x);
-        let x = x.clone() + self.network.forward(x);
+        let x = x.clone() + self.feedforward.forward(x);
         x
     }
 }
 
-/// this struct loads the learned parameters for layer norm
-#[derive(Module, Debug)]
-pub struct MyLayerNorm<B: Backend> {
-    pub beta: Tensor<B, 1>,
-    pub gamma: Tensor<B, 1>,
+#[derive(Config)]
+pub struct Gpt2LayerNormConfig {
+    pub layer_norm_dir: PathBuf,
 }
 
-impl<B: Backend> MyLayerNorm<B> {
-    fn from_dir<P: AsRef<Path>>(layer_norm_dir: P, device: &B::Device) -> Result<Self> {
-        let layer_norm_dir = layer_norm_dir.as_ref();
-
-        let beta_arr: Array1<f32> = ndarray_npy::read_npy(layer_norm_dir.join("b.npy"))?;
+impl Gpt2LayerNormConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Gpt2LayerNorm<B> {
+        let beta_arr: Array1<f32> =
+            ndarray_npy::read_npy(self.layer_norm_dir.join("b.npy")).expect("should load b.npy");
         let beta_vec = beta_arr.iter().cloned().collect::<Vec<_>>();
-        let gamma_arr: Array1<f32> = ndarray_npy::read_npy(layer_norm_dir.join("g.npy"))?;
+        let gamma_arr: Array1<f32> =
+            ndarray_npy::read_npy(self.layer_norm_dir.join("g.npy")).expect("should load g.npy");
         let gamma_vec = gamma_arr.iter().cloned().collect::<Vec<_>>();
 
         let beta: Tensor<B, 1> = Tensor::<B, 1>::from_data(
@@ -308,9 +377,18 @@ impl<B: Backend> MyLayerNorm<B> {
             device,
         );
 
-        Ok(Self { beta, gamma })
+        Gpt2LayerNorm { beta, gamma }
     }
+}
 
+/// this struct loads the learned parameters for layer norm
+#[derive(Module, Debug)]
+pub struct Gpt2LayerNorm<B: Backend> {
+    pub beta: Tensor<B, 1>,
+    pub gamma: Tensor<B, 1>,
+}
+
+impl<B: Backend> Gpt2LayerNorm<B> {
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let eps = 1e-5;
 
