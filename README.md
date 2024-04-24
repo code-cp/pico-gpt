@@ -2,6 +2,8 @@
 
 python scripts/download_model.py 124M ./data
 
+cargo run -r -- --prompt "Alan Turing theorized that computers would one day become" --num-tokens 8
+
 # ref 
 
 - https://github.com/jaymody/picoGPT

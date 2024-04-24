@@ -76,8 +76,9 @@ impl<B: Backend> Model<B> {
                 Data::new(vec![(logits.dims()[0] - 1) as i32], Shape::new([1])).convert(),
                 &device,
             );
-            let next_token_id: Tensor<B, 1, Int> = logits.select(1, indices).argmax(0).unsqueeze();
-            let next_token_id = next_token_id.into_scalar().elem::<f32>();
+            let selected_logits = logits.select(0, indices);
+            let next_token_id = selected_logits.argmax(1);
+            let next_token_id = next_token_id.into_scalar().elem::<i32>();
 
             inputs.push(next_token_id as u64);
         }
@@ -103,6 +104,7 @@ impl<B: Backend> Model<B> {
         );
         let position_embeddings = self.position_embedding.clone().select(0, indices);
 
+        // x size (10x768)
         let mut x = token_embeddings + position_embeddings;
 
         for block in &self.blocks {
@@ -168,7 +170,9 @@ impl<B: Backend> Network<B> {
         let x = self.expand.forward(x);
         let x = self.activation.forward(x);
 
-        self.contract.forward(x)
+        let output = self.contract.forward(x);
+
+        output
     }
 }
 
@@ -217,7 +221,7 @@ impl<B: Backend> Attention<B> {
         v: &Tensor<B, 2>,
         causal_mask: &Tensor<B, 2>,
     ) -> Tensor<B, 2> {
-        let d = (k.dims()[2] as f32).sqrt();
+        let d = (k.dims()[1] as f32).sqrt();
         let kt = k.clone().transpose();
         let qk = q.clone().matmul(kt) / d + causal_mask.clone();
         let probs = activation::softmax(qk, 1);
@@ -228,17 +232,19 @@ impl<B: Backend> Attention<B> {
     pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = self.layer_norm.forward(x);
 
-        let x = self.expand.forward(x);
-        let qkv = Self::split_n(x, 3).unwrap();
+        // x size (10x2034)
+        let x = self.expand.forward(x.clone());
+        let qkv = Self::split_n(x.clone(), 3).unwrap();
         let qkv_heads = qkv
             .iter()
             .map(|v| Self::split_n(v.clone(), self.num_heads).unwrap())
             .collect::<Vec<_>>();
 
         let device = B::Device::default();
-        let head_shape = qkv_heads[0][0].dims();
-        let causal_mask = (Tensor::ones(head_shape, &device)
-            - Tensor::ones(head_shape, &device).tril(0))
+        let head_shape = x.dims()[0];
+        // mask size (10x10)
+        let causal_mask = (Tensor::ones(Shape::new([head_shape, head_shape]), &device)
+            - Tensor::ones(Shape::new([head_shape, head_shape]), &device).tril(0))
             * -1.0e4;
 
         let out_heads = std::iter::zip(std::iter::zip(&qkv_heads[0], &qkv_heads[1]), &qkv_heads[2])
@@ -340,9 +346,13 @@ impl<B: Backend> MyLayerNorm<B> {
         let x = (x - mean) / (var + eps).sqrt();
 
         let gamma = self.gamma.clone().unsqueeze::<2>();
-        let gamma = gamma.repeat(0, x.dims()[1]);
+        let gamma = gamma.repeat(0, x.dims()[0]);
         let beta: Tensor<B, 2> = self.beta.clone().unsqueeze::<2>();
+        let beta = beta.repeat(0, x.dims()[0]);
 
-        gamma.matmul(x) + beta
+        // size (10x1) * (10x768) + (10x1)
+        let output = gamma * x + beta;
+
+        output
     }
 }
