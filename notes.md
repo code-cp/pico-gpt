@@ -1,0 +1,1 @@
+- How can I convert a Vector to Tensor https://github.com/tracel-ai/burn/discussions/1353
