@@ -8,24 +8,43 @@ use burn::{
 use burn_tensor::{activation, Data, Int, Shape};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use std::path::{Path, PathBuf};
+use std::{fs::File, io::BufReader};
 
 use crate::encoder::{Token, TokenId};
 
 #[derive(Config)]
 pub struct ModelConfig {
-    pub model_dir: PathBuf,
-    pub num_heads: usize,
-    pub depth: usize,
+    /// Number of tokens in the vocabulary.
+    pub n_vocab: usize,
+    /// Maximum context / prompt sequence.
+    pub n_ctx: usize,
+    /// Number of attention heads.
+    /// Must be a divisor of `network_width`.
+    pub n_head: usize,
+    /// Width of the network, or the embeding dimension.
+    pub n_embd: usize,
+    /// Width of the network.
+    pub n_layer: usize,
 }
 
 impl ModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> Model<B> {
+    pub fn from_dir(model_dir: PathBuf) -> Self {
+        let file = File::open(model_dir.join("hparams.json")).expect("should load params");
+
+        let buffer = BufReader::new(file);
+
+        let config: Self = serde_json::from_reader(buffer).expect("should load params");
+
+        config
+    }
+
+    pub fn init<B: Backend>(&self, model_dir: PathBuf, device: &B::Device) -> Model<B> {
         let token_embedding_arr: Array2<f32> =
-            ndarray_npy::read_npy(self.model_dir.join("wte.npy")).expect("should load wte");
+            ndarray_npy::read_npy(model_dir.join("wte.npy")).expect("should load wte");
         let token_embedding_vec: Vec<f32> = token_embedding_arr.iter().copied().collect();
 
         let position_embedding_arr: Array2<f32> =
-            ndarray_npy::read_npy(self.model_dir.join("wpe.npy")).expect("should load wpe");
+            ndarray_npy::read_npy(model_dir.join("wpe.npy")).expect("should load wpe");
         let position_embedding_vec: Vec<f32> = position_embedding_arr.iter().copied().collect();
 
         let token_embedding: Tensor<B, 2> = Tensor::<B, 2>::from_data(
@@ -53,13 +72,13 @@ impl ModelConfig {
         );
 
         let layer_norm_config = Gpt2LayerNormConfig {
-            layer_norm_dir: self.model_dir.join("ln_f"),
+            layer_norm_dir: model_dir.join("ln_f"),
         };
 
         let block_config = BlockConfig {
-            model_dir: self.model_dir.to_owned(),
-            num_heads: self.num_heads,
-            depth: self.depth,
+            model_dir: model_dir.to_owned(),
+            num_heads: self.n_head,
+            depth: self.n_layer,
         };
 
         Model {

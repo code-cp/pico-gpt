@@ -1,12 +1,9 @@
 use anyhow::{Context, Result};
 use burn::backend::wgpu::WgpuDevice;
-use burn::backend::{wgpu::AutoGraphicsApi, Autodiff, Wgpu};
 use std::env;
-use std::path::PathBuf;
 
 use pico_gpt::encoder::Encoder;
 use pico_gpt::gpt2::{Model, ModelConfig};
-use pico_gpt::hyper_params::HyperParams;
 
 type Backend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
@@ -17,22 +14,14 @@ fn main() -> Result<()> {
     let prompt = "Alan Turing theorized that computers would one day become";
     let num_tokens = 8;
 
-    let hyper_params = HyperParams::from_dir(&model_dir).context("cannot load hyper params")?;
-    let model_config = ModelConfig {
-        model_dir: model_dir.join("exploded_model"),
-        num_heads: hyper_params.num_heads,
-        depth: hyper_params.network_depth,
-    };
+    let model_config = ModelConfig::from_dir(model_dir.clone());
     let device = WgpuDevice::default();
-    let model: Model<Backend> = model_config.init(&device);
+    let model: Model<Backend> = model_config.init(model_dir.join("exploded_model"), &device);
 
-    let mut encoder = Encoder::from_dir(&model_dir).context("cannot load encoder")?;
+    let mut encoder = Encoder::from_dir(model_dir).context("cannot load encoder")?;
 
     let token_ids = encoder.encode(&prompt).context("cannot encode prompt")?;
-    anyhow::ensure!(
-        token_ids.len() < hyper_params.max_context,
-        "input too large"
-    );
+    anyhow::ensure!(token_ids.len() < model_config.n_ctx, "input too large");
 
     let output_ids = model.generate(token_ids, num_tokens);
     let decoded = encoder.decode(&output_ids);
