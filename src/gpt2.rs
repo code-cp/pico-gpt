@@ -185,36 +185,6 @@ pub struct Attention<B: Backend> {
 }
 
 impl<B: Backend> Attention<B> {
-    fn split_n(x: Tensor<B, 2>, num: usize) -> Result<Vec<Tensor<B, 2>>> {
-        let last_axis_length = x.dims()[1];
-
-        if last_axis_length % num != 0 {
-            bail!("axis of size {last_axis_length} is not divisible by {num}");
-        }
-
-        let subarray_size = last_axis_length / num;
-        let mut splits = Vec::new();
-
-        let device = B::Device::default();
-
-        for i in 0..num {
-            let indices = Tensor::<B, 1, Int>::from_data(
-                Data::new(
-                    (0..subarray_size)
-                        .map(|j| (i * subarray_size + j) as i32)
-                        .collect::<Vec<_>>(),
-                    Shape::new([subarray_size]),
-                )
-                .convert(),
-                &device,
-            );
-            let split = x.clone().select(1, indices);
-            splits.push(split);
-        }
-
-        Ok(splits)
-    }
-
     fn attention(
         q: &Tensor<B, 2>,
         k: &Tensor<B, 2>,
@@ -234,10 +204,10 @@ impl<B: Backend> Attention<B> {
 
         // x size (10x2034)
         let x = self.expand.forward(x.clone());
-        let qkv = Self::split_n(x.clone(), 3).unwrap();
+        let qkv = x.clone().chunk(3, 1);
         let qkv_heads = qkv
             .iter()
-            .map(|v| Self::split_n(v.clone(), self.num_heads).unwrap())
+            .map(|v| v.clone().chunk(self.num_heads, 1))
             .collect::<Vec<_>>();
 
         let device = B::Device::default();
