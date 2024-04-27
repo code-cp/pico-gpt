@@ -1,1 +1,5 @@
 - How can I convert a Vector to Tensor https://github.com/tracel-ai/burn/discussions/1353
+- byte-level Byte-pair encoding tokenizer https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf
+- https://docs.rs/gpt_tokenizer/latest/gpt_tokenizer/
+- https://www.hugchange.life/posts/202311_tokenizer.html
+- https://vgel.me/posts/handmade-transformer/

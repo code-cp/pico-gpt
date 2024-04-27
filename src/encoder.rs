@@ -111,11 +111,13 @@ impl Encoder {
 
     /// map bytes to chars
     /// a simple one-to-one mapping of bytes 0..255 into unicode characters
-    // that "look nice"
+    /// that "look nice"
+    /// eg 32 -> Ġ
     /// ref <https://github.com/karpathy/minGPT/blob/37baab71b9abea1b76ab957409a1cc2fbfba8a26/mingpt/bpe.py#L22-L33>
     /// need to allow converting a character literal (char) to a u8
     #[allow(clippy::char_lit_as_u8)]
     fn byte_to_char() -> HashMap<u8, char> {
+        // first map the bytes to printable chars
         let mut printable: HashSet<u8> = (b'!'..=b'~').collect();
         printable.extend('¡' as u8..='¬' as u8);
         printable.extend('®' as u8..='ÿ' as u8);
@@ -123,6 +125,7 @@ impl Encoder {
         let mut map = HashMap::new();
         let mut n = 2u32.pow(8);
 
+        // map the remaining bytes to chars > 256, which are mostly printable
         for byte in u8::MIN..=u8::MAX {
             if !printable.contains(&byte) {
                 map.insert(byte, char::from_u32(n).unwrap());
@@ -137,7 +140,7 @@ impl Encoder {
     }
 
     /// all adjacent pairs
-    fn pairs_to_pairs(parts: &[String]) -> HashSet<StringPair> {
+    fn parts_to_pairs(parts: &[String]) -> HashSet<StringPair> {
         std::iter::zip(parts.iter().cloned(), parts.iter().skip(1).cloned()).collect()
     }
 
@@ -146,7 +149,7 @@ impl Encoder {
         let mut parts: Vec<String> = word.chars().map(|c| c.to_string()).collect();
 
         loop {
-            let pairs: HashSet<StringPair> = Self::pairs_to_pairs(&parts);
+            let pairs: HashSet<StringPair> = Self::parts_to_pairs(&parts);
 
             // get the highest priority merge
             let Some(bigram) = pairs
@@ -154,7 +157,7 @@ impl Encoder {
                 .min_by_key(|pair| self.bpe_ranks.get(pair).copied().unwrap_or(usize::MAX))
             else {
                 // no more merges
-                // else block handles the case when the min_by_key() function doesn't return any value
+                // else block handles the case when the self.bpe_ranks.get() function doesn't return any value
                 return vec![word];
             };
 

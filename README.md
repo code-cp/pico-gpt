@@ -1,8 +1,11 @@
 # pico-gpt
 
+```
 python scripts/download_model.py 124M ./data
+cargo run
+``` 
 
-cargo run -r -- --prompt "Alan Turing theorized that computers would one day become" --num-tokens 8
+output = " the most powerful military power.\n\n"
 
 # ref 
 

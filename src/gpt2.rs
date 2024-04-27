@@ -15,6 +15,9 @@ use crate::encoder::{Token, TokenId};
 #[derive(Config)]
 pub struct ModelConfig {
     /// Number of tokens in the vocabulary.
+    /// GPT-2 has a vocabulary size of 50,257,
+    /// which corresponds to the 256 bytes base tokens,
+    /// a special end-of-text token and the symbols learned with 50,000 merges
     pub n_vocab: usize,
     /// Maximum context / prompt sequence.
     pub n_ctx: usize,
@@ -134,9 +137,9 @@ impl<B: Backend> Model<B> {
         );
         let token_embeddings = self.token_embedding.clone().select(0, indices);
 
-        let inputs = (0..inputs.len()).map(|i| i as i32).collect::<Vec<_>>();
+        let indices = (0..inputs.len()).map(|i| i as i32).collect::<Vec<_>>();
         let indices = Tensor::<B, 1, Int>::from_data(
-            Data::new(inputs.clone(), Shape::new([inputs.len()])).convert(),
+            Data::new(indices.clone(), Shape::new([indices.len()])).convert(),
             &device,
         );
         let position_embeddings = self.position_embedding.clone().select(0, indices);
@@ -149,6 +152,7 @@ impl<B: Backend> Model<B> {
         }
 
         let x = self.layer_norm.forward(x);
+        // reuse the embedding matrix wte for the projection
         let x = x.matmul(self.token_embedding.clone().transpose());
 
         x
