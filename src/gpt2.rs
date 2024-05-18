@@ -183,7 +183,7 @@ impl Gpt2LinearLayerConfig {
             device,
         );
         let bias: Tensor<B, 1> = Tensor::<B, 1>::from_data(
-            Data::new(weights_vec.clone(), Shape::new([bias_vec.len()])).convert(),
+            Data::new(bias_vec.clone(), Shape::new([bias_vec.len()])).convert(),
             device,
         );
 
